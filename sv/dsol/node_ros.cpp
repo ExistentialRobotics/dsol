@@ -31,6 +31,7 @@ namespace gm = geometry_msgs;
 namespace sm = sensor_msgs;
 namespace vm = visualization_msgs;
 namespace nm = nav_msgs;
+namespace mf = message_filters;
 
 struct NodeData {
   explicit NodeData(const ros::NodeHandle& pnh);
@@ -44,10 +45,9 @@ struct NodeData {
                      const std::string& child_frame);
   void imuCallback(const sm::ImuConstPtr& imu);
   void odomCallback(const nm::OdometryConstPtr& enc);
-  void ImageCallback(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight);
-  void Callback(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight, const sm::ImageConstPtr& msgDepth);
-  void Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageConstPtr cv_ptrRight,
-           const ros::Time timestamp, cv_bridge::CvImageConstPtr cv_ptrDepth = {});
+  void StereoCb(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight);
+  void StereoDepthCb(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight, const sm::ImageConstPtr& msgDepth);
+  void Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageConstPtr cv_ptrRight, const ros::Time timestamp, cv_bridge::CvImageConstPtr cv_ptrDepth = {});
   void getPrediction(double& pred_x, double& pred_y, double& pred_z, double& pred_a);
   void camInfoCallback(const sm::CameraInfo& cinfo);
 
@@ -86,18 +86,15 @@ struct NodeData {
 
   bool use_depth;
   
+  using SyncStereo = mf::TimeSynchronizer<sm::Image, sm::Image>;
+  using SyncStereoDepth = mf::TimeSynchronizer<sm::Image, sm::Image, sm::Image>;
 
-  message_filters::Subscriber<sensor_msgs::Image> *depth_sub_;
+  std::optional<SyncStereo> sync_stereo_;
+  std::optional<SyncStereoDepth> sync_stereo_depth_;
 
-  // With Depth
-  typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::Image> sync_pol_depth;
-  message_filters::Synchronizer<sync_pol_depth> *sync_depth_;
-
-  // Without Depth
-  typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
-  message_filters::Subscriber<sensor_msgs::Image> *left_sub_;
-  message_filters::Subscriber<sensor_msgs::Image> *right_sub_;
-  message_filters::Synchronizer<sync_pol> *sync_;
+  mf::Subscriber<sm::Image> sub_image0_;
+  mf::Subscriber<sm::Image> sub_image1_;
+  mf::Subscriber<sm::Image> sub_depth0_;
 
 
   double prev_time {-1};
@@ -118,7 +115,11 @@ struct NodeData {
 
 };
 
-NodeData::NodeData(const ros::NodeHandle& pnh) : pnh_{pnh} {
+NodeData::NodeData(const ros::NodeHandle& pnh)
+    : pnh_(pnh),
+      sub_image0_(pnh_, "image0", pnh_.param<int>("buff_count", 10)),
+      sub_image1_(pnh_, "image1", pnh_.param<int>("buff_count", 10)),
+      sub_depth0_(pnh_, "depth0", pnh_.param<int>("buff_count", 10)) {
   frame_ = pnh_.param<std::string>("fix_frame", "fixed");
   ROS_INFO_STREAM("fixed frame: " << frame_);
 
@@ -144,11 +145,13 @@ NodeData::NodeData(const ros::NodeHandle& pnh) : pnh_{pnh} {
 
 void NodeData::camInfoCallback(const sm::CameraInfo& msgCInfo) {
   odom_.camera = MakeCamera(msgCInfo);
+  ROS_INFO_STREAM("Camera Intrinsics are: " << odom_.camera.Repr());
   cinfo_sub_.shutdown();
 }
 
 
 void NodeData::imuCallback(const sm::ImuConstPtr& msgImu) {
+  ROS_INFO_STREAM("Received imu message");
   curr_imu_msg_ = *msgImu;
 
   if (!received_imu) {
@@ -189,7 +192,11 @@ void NodeData::getPrediction(double& pred_x, double& pred_y, double& pred_z, dou
   }
 }
 
-void NodeData::ImageCallback(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight) {
+void NodeData::StereoCb(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight) {
+  StereoDepthCb(msgLeft, msgRight, nullptr);
+}
+
+void NodeData::StereoDepthCb(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight, const sensor_msgs::ImageConstPtr& msgDepth) {
   cv_bridge::CvImageConstPtr cv_ptrLeft;
   try {
       cv_ptrLeft = cv_bridge::toCvShare(msgLeft);
@@ -206,45 +213,19 @@ void NodeData::ImageCallback(const sensor_msgs::ImageConstPtr& msgLeft, const se
       return;
   }
 
-  Run(cv_ptrLeft, cv_ptrRight, cv_ptrLeft->header.stamp);
-}
-
-void NodeData::Callback(const sensor_msgs::ImageConstPtr& msgLeft, const sensor_msgs::ImageConstPtr& msgRight, const sensor_msgs::ImageConstPtr& msgDepth) {
-    cv_bridge::CvImageConstPtr cv_ptrLeft;
-  try {
-      cv_ptrLeft = cv_bridge::toCvShare(msgLeft);
-  } catch (cv_bridge::Exception& e) {
-      ROS_ERROR("cv_bridge exception: %s", e.what());
-      return;
+  if (msgDepth) {
+    cv_bridge::CvImageConstPtr cv_ptrDepth;
+    try {
+        cv_ptrDepth = cv_bridge::toCvShare(msgDepth);
+    } catch (cv_bridge::Exception& e) {
+        ROS_ERROR("cv_bridge exception: %s", e.what());
+        return;
+    }  
+    Run(cv_ptrLeft, cv_ptrRight, cv_ptrLeft->header.stamp, cv_ptrDepth);
   }
-
-  cv_bridge::CvImageConstPtr cv_ptrRight;
-  try {
-      cv_ptrRight = cv_bridge::toCvShare(msgRight);
-  } catch (cv_bridge::Exception& e) {
-      ROS_ERROR("cv_bridge exception: %s", e.what());
-      return;
-  }
-
-  cv_bridge::CvImageConstPtr cv_ptrDepth;
-  try {
-      cv_ptrDepth = cv_bridge::toCvShare(msgDepth);
-  } catch (cv_bridge::Exception& e) {
-      ROS_ERROR("cv_bridge exception: %s", e.what());
-      return;
-  }  
-
-  Run(cv_ptrLeft, cv_ptrRight, cv_ptrLeft->header.stamp, cv_ptrDepth);
+  else
+    Run(cv_ptrLeft, cv_ptrRight, cv_ptrLeft->header.stamp, nullptr);
 }
-
-// void SingleImageCallback(const sensor_msgs::ImageConstPtr& image){
-//   ROS_INFO_STREAM("Received an image in left camera");
-//   return;
-// }
-// void NodeData::DoubleImageCallback(const sensor_msgs::ImageConstPtr& image1, const sensor_msgs::ImageConstPtr& image2){
-//   ROS_INFO_STREAM("Received 2 images in both cameras");
-//   return;
-// }
 
 void NodeData::InitRosIO() {
 
@@ -252,46 +233,38 @@ void NodeData::InitRosIO() {
   pnh_.getParam("use_odom", use_odom);
   pnh_.getParam("use_depth", use_depth);
 
+  cinfo_sub_ = pnh_.subscribe("cinfo1", 1, &NodeData::camInfoCallback, this);
+  //cinfo_sub_ = pnh_.subscribe("/camera/infra2/camera_info", pnh_.param<int>("buff_count", 1), &NodeData::camInfoCallback, this);
+  if (use_imu)
+    imu_sub_ = pnh_.subscribe("imu", pnh_.param<int>("buff_count", 10), &NodeData::imuCallback, this);
+  if (use_odom)
+    enc_sub_ = pnh_.subscribe("enc", pnh_.param<int>("buff_count", 10), &NodeData::odomCallback, this);  
+
   clock_pub_ = pnh_.advertise<rosgraph_msgs::Clock>("/clock", 1);
-
-  cinfo_sub_ = pnh_.subscribe(pnh_.param<std::string>("camera_info", "/camera/infra2/camera_info"), pnh_.param<int>("buff_count", 1), &NodeData::camInfoCallback, this);
-
   kf_pub_ = PosePathPublisher(pnh_, "kf", frame_);
   odom_pub_ = PosePathPublisher(pnh_, "odom", frame_);
   points_pub_ = pnh_.advertise<sm::PointCloud2>("points", 1);
   pose_array_pub_ = pnh_.advertise<gm::PoseArray>("poses", 1);
   align_marker_pub_ = pnh_.advertise<vm::Marker>("align_graph", 1);
 
-  left_sub_ = new message_filters::Subscriber<sensor_msgs::Image> (pnh_,
-      pnh_.param<std::string>("cam1_data", "/Image1/data"), pnh_.param<int>("buff_count", 5));
-  right_sub_ = new message_filters::Subscriber<sensor_msgs::Image> (pnh_,
-      pnh_.param<std::string>("cam2_data", "/Image2/data"), pnh_.param<int>("buff_count", 5));
-  depth_sub_ = new message_filters::Subscriber<sensor_msgs::Image> (pnh_,
-      pnh_.param<std::string>("depth_data", "/Depth/data"), pnh_.param<int>("buff_count", 5));
-
   if (use_depth) {
-    sync_depth_ = new message_filters::Synchronizer<sync_pol_depth> (sync_pol_depth(10), *left_sub_, *right_sub_, *depth_sub_);
-    sync_depth_->registerCallback(boost::bind(&NodeData::Callback, this, _1, _2, _3));
-  }
-  else {
-    sync_ = new message_filters::Synchronizer<sync_pol> (sync_pol(10), *left_sub_, *right_sub_);
-    sync_->registerCallback(boost::bind(&NodeData::ImageCallback, this, _1, _2));
-  }
-
-  if (use_imu) {
-    imu_sub_ = pnh_.subscribe(pnh_.param<std::string>("imu_data", "/imu/data"), pnh_.param<int>("buff_count", 50), &NodeData::imuCallback, this);
-  }
-
-  if (use_odom) {
-    enc_sub_ = pnh_.subscribe(pnh_.param<std::string>("enc_data", "/vesc/odom"), pnh_.param<int>("buff_count", 50), &NodeData::odomCallback, this);  
+    ROS_INFO_STREAM("Depth is being used from the camera");
+    sync_stereo_depth_.emplace(sub_image0_, sub_image1_, sub_depth0_, 5);
+    sync_stereo_depth_->registerCallback(
+        boost::bind(&NodeData::StereoDepthCb, this, _1, _2, _3));
+  } else {
+    ROS_INFO_STREAM("Depth is not used from the camera");
+    sync_stereo_.emplace(sub_image0_, sub_image1_, 5);
+    sync_stereo_->registerCallback(
+        boost::bind(&NodeData::StereoCb, this, _1, _2));
   }
 
   pnh_.getParam("data_max_depth", data_max_depth_);
   pnh_.getParam("cloud_max_depth", cloud_max_depth_);
 
-  // intrin = (cv::Mat_<double>(1,5) << pnh_.param<double>("fx",0), pnh_.param<double>("fy",
-  //       0),pnh_.param<double>("cx",0),pnh_.param<double>("cy",0),pnh_.param<double>("bs",0));
-  // ROS_INFO_STREAM("intrinsics: "<<intrin);
+  //intrin = (cv::Mat_<double>(1,5) << pnh_.param<double>("fx",0), pnh_.param<double>("fy",
+        //0),pnh_.param<double>("cx",0),pnh_.param<double>("cy",0),pnh_.param<double>("bs",0));
+  //ROS_INFO_STREAM("intrinsics obtained from the launch file: "<<intrin);
 }
 
 void NodeData::InitOdom() {
@@ -399,6 +372,8 @@ void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageCons
   if (use_depth) {
     image_depth = cv_ptrDepth->image;
     image_depth.convertTo(image_depth, CV_32FC1, 0.001);
+    if (data_max_depth_ > 0)
+      cv::threshold(image_depth, image_depth, data_max_depth_, 0, cv::THRESH_TOZERO_INV);
   }
     
   status = odom_.Estimate(image_l, image_r, dT_pred, image_depth);
