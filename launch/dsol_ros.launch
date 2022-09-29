@@ -32,24 +32,14 @@
 
     <arg name="data" default="d455"/> 
 
-    <arg name="data_max_depth" default="100.0"/>
+    <arg name="data_max_depth" default="0.5"/>
     <arg name="cloud_max_depth" default="50.0"/>
     <arg name="motion_alpha" default="0.5"/>
 
-    <arg name="buff_count" default="1"/>
-
-
-    <!--Use below for simulation-->
-    <!--<arg name="cam1_data" default="/racecar01/realsense/infra1/image_raw"/>-->
-    <!--<arg name="cam2_data" default="/racecar01/realsense/infra2/image_raw"/>-->
-    <!--<arg name="fix_frame" default="/racecar01/map"/>-->
-    <arg name="cam1_data" default="/camera/infra1/image_rect_raw"/>
-    <arg name="cam2_data" default="/camera/infra2/image_rect_raw"/>
-    <arg name="depth_data" default="/camera/depth/image_rect_raw" />
-    <arg name="camera_info" default="/camera/infra2/camera_info" />
-    <arg name="imu_data" default="/imu/data" />
-    <arg name="enc_data" default="/vesc/odom" />
+    <arg name="buff_count" default="5"/>
     <arg name="fix_frame" default="fixed"/>
+
+    <arg name="camera" default="/camera"/>
 
     <!--Camera Intrinsics parameters-->
     <!--const cv::Mat intrin({1, 5}, {430.1014404296875, 430.1014404296875, 420.8174133300781, 241.85072326660156, 0.09493});-->
@@ -78,16 +68,17 @@
         <param name="end" type="int" value="$(arg end)"/>
         <param name="reverse" type="bool" value="$(arg reverse)"/>
 
-        <param name="buff_count" type="int" value="$(arg buff_count)"/>
-        <param name="cam1_data" type="str" value="$(arg cam1_data)"/>
-        <param name="cam2_data" type="str" value="$(arg cam2_data)"/>
-        <param name="depth_data" type="str" value="$(arg depth_data)"/>
-        <param name="imu_data" type="str" value="$(arg imu_data)"/>
-        <param name="enc_data" type="str" value="$(arg enc_data)"/>
-        <param name="camera_info" type="str" value="$(arg camera_info)" />
+        <remap from="~image0" to="$(arg camera)/infra1/image_rect_raw"/>
+        <remap from="~image1" to="$(arg camera)/infra2/image_rect_raw"/>
+        <remap from="~depth0" to="$(arg camera)/depth/image_rect_raw"/>
+        <remap from="~cinfo1" to="$(arg camera)/infra2/camera_info"/>
+        <remap from="~imu"    to="/imu/data"/>
+        <remap from="~enc"    to="/vesc/odom"/>
 
-        <param name="use_imu" type="bool" value="true" />
-        <param name="use_odom" type="bool" value="true" />
+        <param name="buff_count" type="int" value="$(arg buff_count)"/>
+
+        <param name="use_imu" type="bool" value="false" />
+        <param name="use_odom" type="bool" value="false" />
         <param name="use_depth" type="bool" value="true" />
         
         <param name="fix_frame" type="str" value="$(arg fix_frame)"/>
