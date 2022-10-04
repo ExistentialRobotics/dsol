@@ -77,14 +77,12 @@ struct NodeData {
   ros::Subscriber enc_sub_;
   ros::Subscriber cinfo_sub_;
 
-  ros::Time current_frame_time_;
 
   sm::Imu curr_imu_msg_;
   sm::Imu prev_imu_msg_;
   nm::Odometry curr_enc_msg_;
   nm::Odometry prev_enc_msg_;
 
-  bool use_depth;
   
   using SyncStereo = mf::TimeSynchronizer<sm::Image, sm::Image>;
   using SyncStereoDepth = mf::TimeSynchronizer<sm::Image, sm::Image, sm::Image>;
@@ -96,12 +94,12 @@ struct NodeData {
   mf::Subscriber<sm::Image> sub_image1_;
   mf::Subscriber<sm::Image> sub_depth0_;
 
-
   double prev_time {-1};
   int flag {0};
   int cnt {0};
   int buff_count {1};
 
+  bool use_depth;
   bool use_imu;
   bool use_odom;
   
@@ -113,6 +111,11 @@ struct NodeData {
   SE3d dT_pred;
   SE3d T_c0_c_gt;
 
+  bool imu_init {false};
+  PosePathPublisher imu_odom_pub_; //imu predict path publisher
+  Eigen::Vector3d tw_vel{Eigen::Vector3d::Zero()}; //encoder linear velocities along axes
+  ros::Time prev_imu_time; //timestamp for the last IMU message. We integrate over time differences in IMU messages
+  SE3d imu_pred_pose;
 };
 
 NodeData::NodeData(const ros::NodeHandle& pnh)
@@ -151,13 +154,28 @@ void NodeData::camInfoCallback(const sm::CameraInfo& msgCInfo) {
 
 
 void NodeData::imuCallback(const sm::ImuConstPtr& msgImu) {
-  ROS_INFO_STREAM("Received imu message");
   curr_imu_msg_ = *msgImu;
 
   if (!received_imu) {
     prev_imu_msg_ = *msgImu;
     received_imu = true;
   }
+
+  if(!imu_init){
+    prev_imu_time = msgImu->header.stamp;
+    imu_init = true;
+    return;
+  }
+
+  ros::Duration dtime = msgImu->header.stamp - prev_imu_time;
+  prev_imu_time = msgImu->header.stamp;
+
+  Eigen::Vector3d imu_ang_vel;
+  Ros2Eigen(msgImu->angular_velocity, imu_ang_vel);
+  SE3d deltapose = {Sophus::SO3d::exp(imu_ang_vel * dtime.toSec()), tw_vel * dtime.toSec()};
+
+  imu_pred_pose *= deltapose;
+  const gm::PoseStamped pose_msg = imu_odom_pub_.Publish(msgImu->header.stamp, imu_pred_pose);
 }
 
 void NodeData::odomCallback(const nm::OdometryConstPtr& msgEnc) {
@@ -166,6 +184,10 @@ void NodeData::odomCallback(const nm::OdometryConstPtr& msgEnc) {
   if (!received_odom) {
     prev_enc_msg_ = *msgEnc;
     received_odom = true;
+  }
+  //Set the current twist only when IMU has started. We should only use the linear twist from the encoder
+  if(imu_init && (msgEnc->header.stamp - prev_imu_time).sec >= 0){
+    Ros2Eigen(msgEnc->twist.twist.linear, tw_vel);
   }
 }
 
@@ -262,6 +284,8 @@ void NodeData::InitRosIO() {
   pnh_.getParam("data_max_depth", data_max_depth_);
   pnh_.getParam("cloud_max_depth", cloud_max_depth_);
 
+  imu_odom_pub_ = PosePathPublisher(pnh_, "imu_odom", "imudom");
+
   //intrin = (cv::Mat_<double>(1,5) << pnh_.param<double>("fx",0), pnh_.param<double>("fy",
         //0),pnh_.param<double>("cx",0),pnh_.param<double>("cy",0),pnh_.param<double>("bs",0));
   //ROS_INFO_STREAM("intrinsics obtained from the launch file: "<<intrin);
@@ -311,6 +335,7 @@ void NodeData::SendTransform(const geometry_msgs::PoseStamped& pose_msg,
 }
 
 void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageConstPtr cv_ptrRight, const ros::Time timestamp, cv_bridge::CvImageConstPtr cv_ptrDepth) {
+  return;
   double dt;
   double timestamp_sec = timestamp.toSec();
 
