@@ -111,11 +111,12 @@ struct NodeData {
   SE3d dT_pred;
   SE3d T_c0_c_gt;
 
-  bool imu_init {false};
+  bool pred_init {false};
   PosePathPublisher imu_odom_pub_; //imu predict path publisher
   Eigen::Vector3d tw_vel{Eigen::Vector3d::Zero()}; //encoder linear velocities along axes
-  ros::Time prev_imu_time; //timestamp for the last IMU message. We integrate over time differences in IMU messages
-  SE3d imu_pred_pose;
+  ros::Time prev_msg_time; //timestamp for the last IMU/Image message. We integrate over time differences b/w these images
+  SE3d imu_pred_pose; //Default is Identity
+  SE3d acc_pose; //accumulated pose
 };
 
 NodeData::NodeData(const ros::NodeHandle& pnh)
@@ -161,21 +162,26 @@ void NodeData::imuCallback(const sm::ImuConstPtr& msgImu) {
     received_imu = true;
   }
 
-  if(!imu_init){
-    prev_imu_time = msgImu->header.stamp;
-    imu_init = true;
+  if(!pred_init){
+    prev_msg_time = msgImu->header.stamp;
+    pred_init = true;
     return;
   }
+  // If the current imu message is late, ignore it
+  if(msgImu->header.stamp < prev_msg_time)
+    return;
 
-  ros::Duration dtime = msgImu->header.stamp - prev_imu_time;
-  prev_imu_time = msgImu->header.stamp;
+  // Get the delta time to integrate over
+  ros::Duration dtime = msgImu->header.stamp - prev_msg_time;
+  prev_msg_time = msgImu->header.stamp;
 
   Eigen::Vector3d imu_ang_vel;
   Ros2Eigen(msgImu->angular_velocity, imu_ang_vel);
   SE3d deltapose = {Sophus::SO3d::exp(imu_ang_vel * dtime.toSec()), tw_vel * dtime.toSec()};
-
   imu_pred_pose *= deltapose;
-  const gm::PoseStamped pose_msg = imu_odom_pub_.Publish(msgImu->header.stamp, imu_pred_pose);
+  acc_pose *= deltapose;
+
+  const gm::PoseStamped pose_msg = imu_odom_pub_.Publish(msgImu->header.stamp, acc_pose);
 }
 
 void NodeData::odomCallback(const nm::OdometryConstPtr& msgEnc) {
@@ -185,10 +191,8 @@ void NodeData::odomCallback(const nm::OdometryConstPtr& msgEnc) {
     prev_enc_msg_ = *msgEnc;
     received_odom = true;
   }
-  //Set the current twist only when IMU has started. We should only use the linear twist from the encoder
-  if(imu_init && (msgEnc->header.stamp - prev_imu_time).sec >= 0){
-    Ros2Eigen(msgEnc->twist.twist.linear, tw_vel);
-  }
+  //Set the current linear velocity
+  Ros2Eigen(msgEnc->twist.twist.linear, tw_vel);
 }
 
 void NodeData::getPrediction(double& pred_x, double& pred_y, double& pred_z, double& pred_a) {
@@ -335,9 +339,22 @@ void NodeData::SendTransform(const geometry_msgs::PoseStamped& pose_msg,
 }
 
 void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageConstPtr cv_ptrRight, const ros::Time timestamp, cv_bridge::CvImageConstPtr cv_ptrDepth) {
-  return;
   double dt;
   double timestamp_sec = timestamp.toSec();
+
+  if(!pred_init){
+    prev_msg_time = timestamp;
+    pred_init = true;
+  }
+  if(timestamp > prev_msg_time){
+    //integrate further to close the time gap
+    ros::Duration dtime = timestamp - prev_msg_time;
+    prev_msg_time = timestamp;
+    SE3d deltapose = {Sophus::SO3d(), tw_vel * dtime.toSec()};
+    imu_pred_pose *= deltapose;
+    acc_pose *= deltapose;
+  }
+  //ELSE use the pose diff as it is, don't update the last timestamp
 
   double pred_x, pred_y, pred_z, pred_a;
   getPrediction(pred_x, pred_y, pred_z, pred_a);
@@ -351,19 +368,13 @@ void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageCons
   else{
     dt = timestamp_sec - prev_time;
     prev_time = timestamp_sec;
-    // dT_pred = motion_.PredictDelta(dt);
-    if (use_imu) {
-      // const Eigen::Vector3d& pos_ {pred_x, pred_y, pred_z};
-      const Eigen::Vector3d& pos_ {-pred_y, 0, pred_x};     // (-y, -z, x)
-      const Eigen::Matrix3d R_ = Eigen::AngleAxisd(-pred_a, Eigen::Vector3d(0, 1, 0)).toRotationMatrix();   // negative twist on y or pos twist on neg y
-      dT_pred = {R_, pos_};
-    }
-    else {
-      dT_pred = motion_.PredictDelta(dt);
-    }
-
+    dT_pred = motion_.PredictDelta(dt);
     flag = 0;
   }
+
+  // Reset the pose to Identity
+  //dT_pred = imu_pred_pose;
+  imu_pred_pose = SE3d();
 
   auto image_l = cv_ptrLeft->image;
   auto image_r = cv_ptrRight->image;
