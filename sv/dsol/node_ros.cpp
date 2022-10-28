@@ -175,9 +175,24 @@ void NodeData::imuCallback(const sm::ImuConstPtr& msgImu) {
   ros::Duration dtime = msgImu->header.stamp - prev_msg_time;
   prev_msg_time = msgImu->header.stamp;
 
-  Eigen::Vector3d imu_ang_vel;
-  Ros2Eigen(msgImu->angular_velocity, imu_ang_vel);
-  SE3d deltapose = {Sophus::SO3d::exp(imu_ang_vel * dtime.toSec()), tw_vel * dtime.toSec()};
+  // Eigen::Vector3d imu_ang_vel;
+  // Ros2Eigen(msgImu->angular_velocity, imu_ang_vel);
+  float roll_ = -msgImu->angular_velocity.x;
+  float pitch_ = msgImu->angular_velocity.y;
+  float yaw_ = -msgImu->angular_velocity.z;
+  Eigen::Vector3d imu_ang_vel (roll_, pitch_, yaw_);
+  Eigen::Matrix3d dsol_R_imu;
+  dsol_R_imu(0,0) = 0;
+  dsol_R_imu(0,2) = 0;
+  dsol_R_imu(1,0) = 0;
+  dsol_R_imu(1,1) = 0;
+  dsol_R_imu(2,1) = 0;
+  dsol_R_imu(2,2) = 0;
+  dsol_R_imu(0,1) = -1;
+  dsol_R_imu(1,2) = -1;
+  dsol_R_imu(2,0) = 1;
+  // SE3d deltapose = {Sophus::SO3d::exp(imu_ang_vel * dtime.toSec()), tw_vel * dtime.toSec()};
+  SE3d deltapose = {Sophus::SO3d::exp(dsol_R_imu * imu_ang_vel * dtime.toSec()), tw_vel * dtime.toSec()};
   imu_pred_pose *= deltapose;
   acc_pose *= deltapose;
 
@@ -192,7 +207,11 @@ void NodeData::odomCallback(const nm::OdometryConstPtr& msgEnc) {
     received_odom = true;
   }
   //Set the current linear velocity
-  Ros2Eigen(msgEnc->twist.twist.linear, tw_vel);
+  double tang_z_ = msgEnc->twist.twist.linear.x;
+  double tang_x_ = 0;
+  double tang_y_ = 0;
+  tw_vel << tang_x_, tang_y_, tang_z_;
+  // Ros2Eigen(msgEnc->twist.twist.linear, tw_vel);
 }
 
 void NodeData::getPrediction(double& pred_x, double& pred_y, double& pred_z, double& pred_a) {
@@ -351,13 +370,13 @@ void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageCons
     ros::Duration dtime = timestamp - prev_msg_time;
     prev_msg_time = timestamp;
     SE3d deltapose = {Sophus::SO3d(), tw_vel * dtime.toSec()};
-    imu_pred_pose *= deltapose;
-    acc_pose *= deltapose;
+    imu_pred_pose *= deltapose;   // predicted pose between two runs
+    acc_pose *= deltapose;    // accumulated pose for dead reckoning
   }
   //ELSE use the pose diff as it is, don't update the last timestamp
 
-  double pred_x, pred_y, pred_z, pred_a;
-  getPrediction(pred_x, pred_y, pred_z, pred_a);
+  // double pred_x, pred_y, pred_z, pred_a;
+  // getPrediction(pred_x, pred_y, pred_z, pred_a);
 
   if(prev_time < 0){
     motion_.Init(T_c0_c_gt);
@@ -374,7 +393,7 @@ void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageCons
 
   // Reset the pose to Identity
   //dT_pred = imu_pred_pose;
-  imu_pred_pose = SE3d();
+  
 
   auto image_l = cv_ptrLeft->image;
   auto image_r = cv_ptrRight->image;
@@ -412,7 +431,9 @@ void NodeData::Run(cv_bridge::CvImageConstPtr cv_ptrLeft, cv_bridge::CvImageCons
       cv::threshold(image_depth, image_depth, data_max_depth_, 0, cv::THRESH_TOZERO_INV);
   }
     
-  status = odom_.Estimate(image_l, image_r, dT_pred, image_depth);
+  // status = odom_.Estimate(image_l, image_r, dT_pred, image_depth);
+  status = odom_.Estimate(image_l, image_r, imu_pred_pose, image_depth);
+  imu_pred_pose = SE3d();   // set to identity again
 
   ROS_INFO_STREAM(status.Repr());
 

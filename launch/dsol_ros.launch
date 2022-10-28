@@ -96,8 +96,9 @@
     <!--IMPORTANT : Also have to use "clock" arg with rosbag play  -->
     <!--We are basically inserting a TF online in the stream of TFs with older timestamps. Need to use sim time. Octomap should use "map" as frame_id-->
     <!--You don't have to use below when using gazebo simulation. Only with rosbag-->
+    <node pkg="rosbag" type="play" name="rosbag" args="--clock /home/parallels/erl_car_ws/rosbags/19sep.bag"/>
     <param name="/use_sim_time" value="true" />
-    <node pkg="tf" type="static_transform_publisher" name="map_link_broadcaster" args="0 0 0 0 0 1.57 fixed map 100" />
+    <!--<node pkg="tf" type="static_transform_publisher" name="map_link_broadcaster" args="0 0 0 0 0 1.57 fixed map 100" />-->
 
 </launch>
 
